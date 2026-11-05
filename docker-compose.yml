@@ -1,0 +1,132 @@
+# Local deployment for the Maintenance Management System (modular hexagonal monolith).
+# Infrastructure (postgres, redis, minio) starts by default.
+# Pinned image versions; secrets come from .env (see .env.example).
+# The backend is under the "app" profile:
+#   docker compose up -d                          -> infrastructure only (run the API on the host)
+#   docker compose --profile app up -d --build    -> infrastructure + backend + PWA
+
+name: mantenimiento-locativo
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ml-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: America/Bogota
+      PGTZ: America/Bogota
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ml-redis
+    restart: unless-stopped
+    # Redis is only a job queue (BullMQ), not a source of truth, but AOF keeps
+    # pending jobs across restarts.
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # S3-compatible object storage for photo evidence.
+  # The official minio/minio image is no longer published on Docker Hub, so this
+  # uses pgsty/minio, a community build of the same open-source server.
+  # The private "evidencias" bucket is created by the backend at startup
+  # (idempotent); photos are only read through signed URLs.
+  minio:
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    container_name: ml-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"     # S3 API
+      - "${MINIO_CONSOLE_PORT:-9001}:9001" # Web console
+    volumes:
+      - minio_data:/data
+
+  backend:
+    profiles: ["app"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ml-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3000
+      TZ: America/Bogota
+      ZONA_HORARIA: America/Bogota
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_USE_SSL: "false"
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET_EVIDENCIAS: ${MINIO_BUCKET_EVIDENCIAS}
+      # Host the browser uses to open signed photo URLs (not the internal "minio").
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://localhost:9000}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_ACCESS_TTL: 15m
+      JWT_REFRESH_TTL: 7d
+      # Max allowed difference between device clock and server clock before a
+      # record is flagged as a time inconsistency (anti-fraud).
+      CLOCK_SKEW_TOLERANCE_SECONDS: ${CLOCK_SKEW_TOLERANCE_SECONDS:-300}
+      MAX_OFFLINE_HOURS: ${MAX_OFFLINE_HOURS:-72}
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # Operator PWA + admin/supervisor monitor, served by Nginx, which also
+  # proxies /api to the backend.
+  pwa:
+    profiles: ["app"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ml-pwa
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${PWA_PORT:-8080}:80"
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

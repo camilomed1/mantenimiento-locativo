@@ -1,0 +1,301 @@
+// Maintenance Management System - relational model (PostgreSQL 16).
+//
+// Offline-first design notes:
+// - Records created on the operator's phone (Asistencia, Ejecucion, Evidencia)
+//   carry a client_uuid generated on the device. It is UNIQUE, so re-sending
+//   the same record during sync never creates a duplicate (idempotency).
+// - Every time mark stores two clocks: the device time (when the operator
+//   pressed the button, possibly offline) and the server time (when the record
+//   arrived). A large difference is flagged as a time inconsistency.
+// - Photos are not stored here. Only the MinIO object key, SHA-256 hash and
+//   capture date are stored.
+//
+// Tables are snake_case in the database; models are PascalCase in code.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Rol {
+  ADMINISTRADOR
+  ADMINISTRATIVO
+  SUPERVISOR
+  OPERARIO
+}
+
+enum TipoServicio {
+  PISCINA
+  PINTURA
+  JARDINERIA
+  OTRO
+}
+
+enum EstadoProgramacion {
+  BORRADOR
+  PUBLICADA
+  CANCELADA
+}
+
+enum TipoMarcaAsistencia {
+  ENTRADA
+  SALIDA
+}
+
+enum EstadoEjecucion {
+  EN_CURSO
+  FINALIZADA
+}
+
+enum MomentoEvidencia {
+  ANTES
+  DURANTE
+  DESPUES
+}
+
+enum EstadoOutbox {
+  PENDIENTE
+  PUBLICADO
+  FALLIDO
+}
+
+// ---------------------------------------------------------------------------
+// Identity and Access module
+// ---------------------------------------------------------------------------
+
+model Usuario {
+  id            String   @id @default(uuid()) @db.Uuid
+  // Institutional email; also used to send the weekly schedule.
+  email         String   @unique @db.VarChar(150)
+  // Argon2id hash. Plain passwords are never stored.
+  passwordHash  String   @map("password_hash") @db.VarChar(255)
+  nombre        String   @db.VarChar(150)
+  rol           Rol
+  activo        Boolean  @default(true)
+  creadoEn      DateTime @default(now()) @map("creado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime @updatedAt @map("actualizado_en") @db.Timestamptz(3)
+
+  operario                Operario?
+  programacionesSupervisa Programacion[] @relation("ProgramacionSupervisor")
+  programacionesCreadas   Programacion[] @relation("ProgramacionCreador")
+
+  @@index([rol])
+  @@map("usuario")
+}
+
+// ---------------------------------------------------------------------------
+// Operator profile (Hojas de Vida module keeps the full CV in later steps)
+// ---------------------------------------------------------------------------
+
+model Operario {
+  id            String   @id @default(uuid()) @db.Uuid
+  usuarioId     String   @unique @map("usuario_id") @db.Uuid
+  documento     String   @unique @db.VarChar(20)
+  nombres       String   @db.VarChar(100)
+  apellidos     String   @db.VarChar(100)
+  telefono      String?  @db.VarChar(20)
+  fechaIngreso  DateTime @map("fecha_ingreso") @db.Date
+  activo        Boolean  @default(true)
+  creadoEn      DateTime @default(now()) @map("creado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime @updatedAt @map("actualizado_en") @db.Timestamptz(3)
+
+  usuario        Usuario        @relation(fields: [usuarioId], references: [id], onDelete: Restrict)
+  programaciones Programacion[]
+  asistencias    Asistencia[]
+  ejecuciones    Ejecucion[]
+
+  @@map("operario")
+}
+
+// ---------------------------------------------------------------------------
+// Work site (gated community). Includes the geofence used by Asistencia.
+// ---------------------------------------------------------------------------
+
+model Conjunto {
+  id                  String   @id @default(uuid()) @db.Uuid
+  nombre              String   @db.VarChar(150)
+  direccion           String   @db.VarChar(200)
+  ciudad              String   @db.VarChar(80)
+  latitud             Decimal  @db.Decimal(9, 6)
+  longitud            Decimal  @db.Decimal(9, 6)
+  radioGeocercaMetros Int      @default(150) @map("radio_geocerca_metros")
+  activo              Boolean  @default(true)
+  creadoEn            DateTime @default(now()) @map("creado_en") @db.Timestamptz(3)
+  actualizadoEn       DateTime @updatedAt @map("actualizado_en") @db.Timestamptz(3)
+
+  programaciones Programacion[]
+  asistencias    Asistencia[]
+
+  @@map("conjunto")
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling module: one row = one activity assigned to an operator, at a
+// site, on a specific weekday, under a supervisor.
+// ---------------------------------------------------------------------------
+
+model Programacion {
+  id            String             @id @default(uuid()) @db.Uuid
+  operarioId    String             @map("operario_id") @db.Uuid
+  conjuntoId    String             @map("conjunto_id") @db.Uuid
+  supervisorId  String             @map("supervisor_id") @db.Uuid
+  creadoPorId   String             @map("creado_por_id") @db.Uuid
+  // Monday of the week this assignment belongs to (groups the weekly email).
+  semanaInicio  DateTime           @map("semana_inicio") @db.Date
+  fecha         DateTime           @db.Date
+  tipoServicio  TipoServicio       @map("tipo_servicio")
+  actividad     String             @db.VarChar(200)
+  descripcion   String?            @db.Text
+  estado        EstadoProgramacion @default(BORRADOR)
+  publicadaEn   DateTime?          @map("publicada_en") @db.Timestamptz(3)
+  creadoEn      DateTime           @default(now()) @map("creado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime           @updatedAt @map("actualizado_en") @db.Timestamptz(3)
+
+  operario   Operario   @relation(fields: [operarioId], references: [id], onDelete: Restrict)
+  conjunto   Conjunto   @relation(fields: [conjuntoId], references: [id], onDelete: Restrict)
+  supervisor Usuario    @relation("ProgramacionSupervisor", fields: [supervisorId], references: [id], onDelete: Restrict)
+  creadoPor  Usuario    @relation("ProgramacionCreador", fields: [creadoPorId], references: [id], onDelete: Restrict)
+  ejecucion  Ejecucion?
+
+  // Operator agenda lookup ("my activities this week / today").
+  @@index([operarioId, fecha])
+  @@index([conjuntoId, fecha])
+  @@index([supervisorId, fecha])
+  @@index([semanaInicio, estado])
+  @@map("programacion")
+}
+
+// ---------------------------------------------------------------------------
+// Attendance module (SELECTED MODULE 1): check-in / check-out marks.
+// Each mark is created offline as an independent record with its own
+// client_uuid, so check-in and check-out sync independently.
+// ---------------------------------------------------------------------------
+
+model Asistencia {
+  id                 String              @id @default(uuid()) @db.Uuid
+  // Generated on the device. UNIQUE guarantees idempotent sync.
+  clientUuid         String              @unique @map("client_uuid") @db.Uuid
+  operarioId         String              @map("operario_id") @db.Uuid
+  conjuntoId         String              @map("conjunto_id") @db.Uuid
+  tipo               TipoMarcaAsistencia
+  // Working day of the mark (derived from device time, local timezone).
+  fecha              DateTime            @db.Date
+  // Time on the operator's phone when the button was pressed.
+  horaDispositivo    DateTime            @map("hora_dispositivo") @db.Timestamptz(3)
+  // Time the server received the record (set by the server, never the client).
+  horaServidor       DateTime            @default(now()) @map("hora_servidor") @db.Timestamptz(3)
+  // horaServidor - horaDispositivo, in seconds. Large positive values are
+  // normal for offline marks; negative values mean the device clock is ahead.
+  desfaseSegundos    Int                 @map("desfase_segundos")
+  inconsistenciaHora Boolean             @default(false) @map("inconsistencia_hora")
+  // Optional GPS reading; null when the phone could not get a fix.
+  latitud            Decimal?            @db.Decimal(9, 6)
+  longitud           Decimal?            @db.Decimal(9, 6)
+  precisionMetros    Decimal?            @map("precision_metros") @db.Decimal(8, 2)
+  // Result of comparing the GPS position with the site geofence.
+  dentroGeocerca     Boolean?            @map("dentro_geocerca")
+
+  operario Operario @relation(fields: [operarioId], references: [id], onDelete: Restrict)
+  conjunto Conjunto @relation(fields: [conjuntoId], references: [id], onDelete: Restrict)
+
+  // Business rule enforced at DB level as a last line of defense:
+  // one check-in and one check-out per operator, site and day.
+  // (Check-out requiring a previous check-in is validated in the domain.)
+  @@unique([operarioId, conjuntoId, fecha, tipo])
+  @@index([operarioId, fecha])
+  @@index([conjuntoId, fecha])
+  @@map("asistencia")
+}
+
+// ---------------------------------------------------------------------------
+// Execution and Evidence module (SELECTED MODULE 2): start / end of an
+// assigned activity. Created offline when the operator taps "Start"; the same
+// client_uuid is reused when tapping "Finish", so finishing is an idempotent
+// update of the same row.
+// ---------------------------------------------------------------------------
+
+model Ejecucion {
+  id             String          @id @default(uuid()) @db.Uuid
+  clientUuid     String          @unique @map("client_uuid") @db.Uuid
+  // One execution per scheduled activity.
+  programacionId String          @unique @map("programacion_id") @db.Uuid
+  operarioId     String          @map("operario_id") @db.Uuid
+  estado         EstadoEjecucion @default(EN_CURSO)
+
+  horaInicioDispositivo DateTime  @map("hora_inicio_dispositivo") @db.Timestamptz(3)
+  horaInicioServidor    DateTime  @default(now()) @map("hora_inicio_servidor") @db.Timestamptz(3)
+  horaFinDispositivo    DateTime? @map("hora_fin_dispositivo") @db.Timestamptz(3)
+  horaFinServidor       DateTime? @map("hora_fin_servidor") @db.Timestamptz(3)
+  inconsistenciaHora    Boolean   @default(false) @map("inconsistencia_hora")
+  observaciones         String?   @db.Text
+
+  creadoEn      DateTime @default(now()) @map("creado_en") @db.Timestamptz(3)
+  actualizadoEn DateTime @updatedAt @map("actualizado_en") @db.Timestamptz(3)
+
+  programacion Programacion @relation(fields: [programacionId], references: [id], onDelete: Restrict)
+  operario     Operario     @relation(fields: [operarioId], references: [id], onDelete: Restrict)
+  evidencias   Evidencia[]
+
+  @@index([operarioId, horaInicioDispositivo])
+  @@index([estado])
+  @@map("ejecucion")
+}
+
+// ---------------------------------------------------------------------------
+// Photo evidence (part of module 2). The binary lives in MinIO; this row only
+// keeps the object reference and integrity data.
+// ---------------------------------------------------------------------------
+
+model Evidencia {
+  id            String           @id @default(uuid()) @db.Uuid
+  clientUuid    String           @unique @map("client_uuid") @db.Uuid
+  ejecucionId   String           @map("ejecucion_id") @db.Uuid
+  momento       MomentoEvidencia
+  // Object location in MinIO (e.g. "2026/11/05/<ejecucionId>/<clientUuid>.jpg").
+  bucket        String           @db.VarChar(63)
+  objectKey     String           @unique @map("object_key") @db.VarChar(300)
+  // SHA-256 computed on the device and verified by the server after upload.
+  sha256        String           @db.Char(64)
+  mimeType      String           @map("mime_type") @db.VarChar(50)
+  tamanoBytes   Int              @map("tamano_bytes")
+  // Device time when the photo was taken / server time when it arrived.
+  horaCaptura   DateTime         @map("hora_captura") @db.Timestamptz(3)
+  horaRecepcion DateTime         @default(now()) @map("hora_recepcion") @db.Timestamptz(3)
+  latitud       Decimal?         @db.Decimal(9, 6)
+  longitud      Decimal?         @db.Decimal(9, 6)
+
+  ejecucion Ejecucion @relation(fields: [ejecucionId], references: [id], onDelete: Restrict)
+
+  // Exactly one photo per moment (before / during / after) per execution.
+  @@unique([ejecucionId, momento])
+  @@map("evidencia")
+}
+
+// ---------------------------------------------------------------------------
+// Transactional Outbox: domain events (EntradaRegistrada, EvidenciaRecibida,
+// EjecucionFinalizada...) are written in the same transaction as the data
+// change, then published to Redis/SSE by a worker. No event is lost if the
+// process crashes between saving and publishing.
+// ---------------------------------------------------------------------------
+
+model OutboxEvento {
+  id          String       @id @default(uuid()) @db.Uuid
+  tipo        String       @db.VarChar(100)
+  agregadoId  String       @map("agregado_id") @db.Uuid
+  payload     Json
+  estado      EstadoOutbox @default(PENDIENTE)
+  intentos    Int          @default(0)
+  creadoEn    DateTime     @default(now()) @map("creado_en") @db.Timestamptz(3)
+  publicadoEn DateTime?    @map("publicado_en") @db.Timestamptz(3)
+
+  @@index([estado, creadoEn])
+  @@map("outbox_evento")
+}

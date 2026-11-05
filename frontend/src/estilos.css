@@ -1,0 +1,68 @@
+/* Plain, light UI: big touch targets for low-end phones, no frameworks. */
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #fff; color: #111; }
+body { font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+#root { max-width: 640px; margin: 0 auto; padding: 0 12px 40px; }
+
+h1 { font-size: 20px; margin: 16px 0 8px; }
+h2 { font-size: 17px; margin: 0 0 4px; }
+h3 { font-size: 15px; margin: 16px 0 6px; }
+p { margin: 4px 0; }
+small, .tenue { color: #555; font-size: 14px; }
+
+button {
+  font: inherit;
+  min-height: 44px;
+  padding: 8px 14px;
+  background: #f0f0f0;
+  color: #111;
+  border: 1px solid #999;
+  border-radius: 3px;
+  cursor: pointer;
+}
+button:active { background: #e2e2e2; }
+button:disabled { color: #888; border-color: #ccc; cursor: default; }
+button.principal { background: #222; color: #fff; border-color: #222; }
+button.principal:disabled { background: #999; border-color: #999; }
+button.enlace { background: none; border: none; padding: 4px 0; min-height: 0; text-decoration: underline; }
+
+input, textarea {
+  font: inherit;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #999;
+  border-radius: 3px;
+  background: #fff;
+}
+label { display: block; margin: 10px 0 4px; }
+
+.barra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid #ccc;
+}
+.barra .relleno { flex: 1; }
+
+.caja { border: 1px solid #bbb; padding: 12px; margin: 12px 0; }
+.fila { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.fila > button { flex: 1; }
+.lista { list-style: none; padding: 0; margin: 0; }
+.lista > li { border-top: 1px solid #ddd; padding: 10px 0; }
+
+.aviso { border: 1px solid #b58900; background: #fff8e1; padding: 8px 10px; margin: 10px 0; }
+.error { border: 1px solid #b00020; background: #fdecee; padding: 8px 10px; margin: 10px 0; }
+.ok { color: #1b5e20; }
+.malo { color: #b00020; }
+.pendiente { color: #8a5a00; }
+
+.fotos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.foto { border: 1px solid #bbb; padding: 6px; text-align: center; }
+.foto img, .foto .vacia { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; background: #f4f4f4; }
+.foto .vacia { display: flex; align-items: center; justify-content: center; color: #777; font-size: 13px; }
+.foto button { width: 100%; margin-top: 6px; padding: 6px; font-size: 14px; }
+
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+td, th { border-bottom: 1px solid #ddd; padding: 6px 4px; text-align: left; vertical-align: top; }
